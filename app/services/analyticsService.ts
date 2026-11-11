@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   courses,
@@ -11,8 +11,9 @@ import {
 } from "~/db/schema";
 
 // ─── Analytics Service ───
-// Aggregated instructor analytics: summary numbers across the instructor's
-// published and archived courses. Drafts are excluded everywhere.
+// Aggregated instructor analytics: summary numbers and one row per course,
+// across the instructor's published and archived courses. Drafts are excluded
+// everywhere.
 // Uses positional parameters (project convention).
 
 const ANALYTICS_STATUSES = [CourseStatus.Published, CourseStatus.Archived];
@@ -24,6 +25,17 @@ export type AnalyticsSummary = {
   /** Percentage 0–100, or null when there are no enrollments. */
   completionRate: number | null;
   /** Percentage 0–100, or null when there are no enrollments. */
+  averageProgress: number | null;
+};
+
+export type CourseAnalytics = {
+  id: number;
+  title: string;
+  enrolled: number;
+  completed: number;
+  /** Percentage 0–100, or null when the course has no enrollments. */
+  completionRate: number | null;
+  /** Percentage 0–100, or null when the course has no enrollments. */
   averageProgress: number | null;
 };
 
@@ -52,18 +64,36 @@ function toPercent(fraction: number | null) {
   return fraction === null ? null : Math.round(fraction * 100);
 }
 
+/** Completed ÷ enrolled as a percentage; null when nobody is enrolled. */
+function completionRate(completed: number, enrolled: number) {
+  return toPercent(enrolled === 0 ? null : completed / enrolled);
+}
+
 export function getInstructorAnalytics(instructorId: number) {
-  const courseIds = db
-    .select({ id: courses.id })
+  // Left join so courses without enrollments still get a row; the null
+  // enrollment row must not count as a 0% enrollment in the average.
+  const courseRows = db
+    .select({
+      id: courses.id,
+      title: courses.title,
+      enrolled: sql<number>`count(${enrollments.id})`,
+      completed: sql<number>`count(${enrollments.completedAt})`,
+      averageProgress: sql<number | null>`avg(case when ${enrollments.id} is null
+        then null else ${enrollmentProgress} end)`,
+    })
     .from(courses)
+    .leftJoin(enrollments, eq(enrollments.courseId, courses.id))
     .where(
       and(
         eq(courses.instructorId, instructorId),
         inArray(courses.status, ANALYTICS_STATUSES)
       )
     )
-    .all()
-    .map((c) => c.id);
+    .groupBy(courses.id)
+    .orderBy(asc(courses.title), asc(courses.id))
+    .all();
+
+  const courseIds = courseRows.map((c) => c.id);
 
   const counts = db
     .select({
@@ -80,11 +110,22 @@ export function getInstructorAnalytics(instructorId: number) {
     uniqueStudents: counts.uniqueStudents,
     enrollments: counts.enrollments,
     completedEnrollments: counts.completed,
-    completionRate: toPercent(
-      counts.enrollments === 0 ? null : counts.completed / counts.enrollments
-    ),
+    completionRate: completionRate(counts.completed, counts.enrollments),
     averageProgress: toPercent(counts.averageProgress),
   };
 
-  return { hasCourses: courseIds.length > 0, summary };
+  const courseAnalytics: CourseAnalytics[] = courseRows.map((row) => ({
+    id: row.id,
+    title: row.title,
+    enrolled: row.enrolled,
+    completed: row.completed,
+    completionRate: completionRate(row.completed, row.enrolled),
+    averageProgress: toPercent(row.averageProgress),
+  }));
+
+  return {
+    hasCourses: courseIds.length > 0,
+    summary,
+    courses: courseAnalytics,
+  };
 }

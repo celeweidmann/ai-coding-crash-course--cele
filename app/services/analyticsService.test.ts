@@ -193,6 +193,108 @@ describe("getInstructorAnalytics", () => {
     });
   });
 
+  describe("courses", () => {
+    it("returns one row per course with its enrollment numbers", () => {
+      const lessons = createLessons(base.course.id, 2);
+      const s2 = createStudent("s2@example.com");
+      enroll(base.user.id, base.course.id, true);
+      enroll(s2.id, base.course.id);
+      lessons.forEach((l) => completeLesson(base.user.id, l.id));
+
+      const { courses } = getInstructorAnalytics(base.instructor.id);
+
+      expect(courses).toEqual([
+        {
+          id: base.course.id,
+          title: base.course.title,
+          enrolled: 2,
+          completed: 1,
+          completionRate: 50,
+          averageProgress: 50,
+        },
+      ]);
+    });
+
+    it("returns null rates for a course with no enrollments", () => {
+      createLessons(base.course.id, 3);
+
+      const { courses } = getInstructorAnalytics(base.instructor.id);
+
+      expect(courses).toEqual([
+        {
+          id: base.course.id,
+          title: base.course.title,
+          enrolled: 0,
+          completed: 0,
+          completionRate: null,
+          averageProgress: null,
+        },
+      ]);
+    });
+
+    it("keeps each course's numbers separate", () => {
+      // Course A: 2 lessons, two students — one finished (100%), one at 50%.
+      // Course B: 4 lessons, one student at 25%, not finished.
+      const lessonsA = createLessons(base.course.id, 2);
+      const courseB = createCourse(base.instructor.id, "course-b");
+      const lessonsB = createLessons(courseB.id, 4);
+      const s2 = createStudent("s2@example.com");
+      enroll(base.user.id, base.course.id, true);
+      enroll(s2.id, base.course.id);
+      enroll(base.user.id, courseB.id);
+      lessonsA.forEach((l) => completeLesson(base.user.id, l.id));
+      completeLesson(s2.id, lessonsA[0].id);
+      completeLesson(base.user.id, lessonsB[0].id);
+
+      const { courses } = getInstructorAnalytics(base.instructor.id);
+      const byId = new Map(courses.map((c) => [c.id, c]));
+
+      expect(byId.get(base.course.id)).toMatchObject({
+        enrolled: 2,
+        completed: 1,
+        completionRate: 50,
+        averageProgress: 75,
+      });
+      expect(byId.get(courseB.id)).toMatchObject({
+        enrolled: 1,
+        completed: 0,
+        completionRate: 0,
+        averageProgress: 25,
+      });
+    });
+
+    it("adds up to the summary", () => {
+      // Course A: 2 lessons, progress 100% and 0%  → average 50.
+      // Course B: 1 lesson, progress 100%          → average 100.
+      // Course C: no enrollments, must not drag the summary average down.
+      // Summary average over all 3 enrollments = (100 + 0 + 100) / 3 ≈ 67.
+      const lessonsA = createLessons(base.course.id, 2);
+      const courseB = createCourse(base.instructor.id, "course-b");
+      const [lessonB] = createLessons(courseB.id, 1);
+      createCourse(base.instructor.id, "course-c");
+      const s2 = createStudent("s2@example.com");
+      enroll(base.user.id, base.course.id, true);
+      enroll(s2.id, base.course.id);
+      enroll(base.user.id, courseB.id, true);
+      lessonsA.forEach((l) => completeLesson(base.user.id, l.id));
+      completeLesson(base.user.id, lessonB.id);
+
+      const { summary, courses } = getInstructorAnalytics(base.instructor.id);
+
+      expect(courses).toHaveLength(3);
+      expect(courses.reduce((n, c) => n + c.enrolled, 0)).toBe(3);
+      expect(courses.reduce((n, c) => n + c.completed, 0)).toBe(2);
+      expect(summary.enrollments).toBe(3);
+      expect(summary.completedEnrollments).toBe(2);
+      expect(courses.map((c) => c.averageProgress).sort()).toEqual([
+        100,
+        50,
+        null,
+      ].sort());
+      expect(summary.averageProgress).toBe(67);
+    });
+  });
+
   describe("course scope", () => {
     it("excludes draft courses and includes archived ones", () => {
       const draft = createCourse(
@@ -209,11 +311,14 @@ describe("getInstructorAnalytics", () => {
       enroll(base.user.id, draft.id, true);
       enroll(s2.id, archived.id, true);
 
-      const { summary } = getInstructorAnalytics(base.instructor.id);
+      const { summary, courses } = getInstructorAnalytics(base.instructor.id);
 
       expect(summary.enrollments).toBe(1);
       expect(summary.completedEnrollments).toBe(1);
       expect(summary.uniqueStudents).toBe(1);
+      expect(courses.map((c) => c.id).sort()).toEqual(
+        [base.course.id, archived.id].sort()
+      );
     });
 
     it("treats an instructor with only draft courses as having no courses", () => {
@@ -235,6 +340,8 @@ describe("getInstructorAnalytics", () => {
       expect(mine.summary.completionRate).toBeNull();
       expect(theirs.summary.enrollments).toBe(1);
       expect(theirs.summary.completionRate).toBe(100);
+      expect(mine.courses.map((c) => c.id)).toEqual([base.course.id]);
+      expect(theirs.courses.map((c) => c.id)).toEqual([otherCourse.id]);
     });
   });
 });

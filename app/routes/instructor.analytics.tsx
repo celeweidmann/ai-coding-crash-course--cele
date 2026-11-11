@@ -39,6 +39,12 @@ function formatPercent(value: number | null) {
   return value === null ? "—" : `${value}%`;
 }
 
+const headerClass =
+  "px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground";
+const numericHeaderClass =
+  "px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-muted-foreground";
+const numericCellClass = "px-4 py-3 text-right text-sm tabular-nums";
+
 export function HydrateFallback() {
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -48,6 +54,7 @@ export function HydrateFallback() {
           <Skeleton key={i} className="h-24" />
         ))}
       </div>
+      <Skeleton className="mt-10 h-48" />
     </div>
   );
 }
@@ -55,7 +62,7 @@ export function HydrateFallback() {
 export default function InstructorAnalytics({
   loaderData,
 }: Route.ComponentProps) {
-  const { hasCourses, summary } = loaderData;
+  const { hasCourses, summary, courses } = loaderData;
 
   const stats = [
     { label: "Students", value: String(summary.uniqueStudents) },
@@ -97,18 +104,59 @@ export default function InstructorAnalytics({
           </Link>
         </div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-          {stats.map((stat) => (
-            <Card key={stat.label}>
-              <CardContent className="pt-6">
-                <p className="text-sm text-muted-foreground">{stat.label}</p>
-                <p className="mt-1 text-3xl font-bold tabular-nums">
-                  {stat.value}
-                </p>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
+        <>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+            {stats.map((stat) => (
+              <Card key={stat.label}>
+                <CardContent className="pt-6">
+                  <p className="text-sm text-muted-foreground">{stat.label}</p>
+                  <p className="mt-1 text-3xl font-bold tabular-nums">
+                    {stat.value}
+                  </p>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+
+          <h2 className="mb-4 mt-10 text-xl font-semibold">Courses</h2>
+          <Card>
+            <CardContent className="p-0">
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-border bg-muted/50">
+                      <th className={headerClass}>Course</th>
+                      <th className={numericHeaderClass}>Enrolled</th>
+                      <th className={numericHeaderClass}>Completed</th>
+                      <th className={numericHeaderClass}>Completion rate</th>
+                      <th className={numericHeaderClass}>Average progress</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {courses.map((course) => (
+                      <tr
+                        key={course.id}
+                        className="border-b border-border last:border-0"
+                      >
+                        <td className="px-4 py-3 text-sm font-medium">
+                          {course.title}
+                        </td>
+                        <td className={numericCellClass}>{course.enrolled}</td>
+                        <td className={numericCellClass}>{course.completed}</td>
+                        <td className={numericCellClass}>
+                          {formatPercent(course.completionRate)}
+                        </td>
+                        <td className={numericCellClass}>
+                          {formatPercent(course.averageProgress)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        </>
       )}
     </div>
   );
