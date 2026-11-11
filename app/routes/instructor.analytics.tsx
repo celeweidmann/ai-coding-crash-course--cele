@@ -155,6 +155,7 @@ export default function InstructorAnalytics({
                       <th className={numericHeaderClass}>Completed</th>
                       <th className={numericHeaderClass}>Completion rate</th>
                       <th className={numericHeaderClass}>Average progress</th>
+                      <th className={headerClass}>Biggest drop</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -173,6 +174,18 @@ export default function InstructorAnalytics({
                         </td>
                         <td className={numericCellClass}>
                           {formatPercent(course.averageProgress)}
+                        </td>
+                        <td className="px-4 py-3 text-sm">
+                          {course.biggestDrop ? (
+                            <>
+                              {course.biggestDrop.title}{" "}
+                              <span className="tabular-nums text-muted-foreground">
+                                (−{course.biggestDrop.drop} pts)
+                              </span>
+                            </>
+                          ) : (
+                            "—"
+                          )}
                         </td>
                       </tr>
                     ))}

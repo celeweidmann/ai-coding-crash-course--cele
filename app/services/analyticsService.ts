@@ -37,6 +37,19 @@ export type CourseAnalytics = {
   completionRate: number | null;
   /** Percentage 0–100, or null when the course has no enrollments. */
   averageProgress: number | null;
+  /** Null when the course has no enrollments or no lessons. */
+  biggestDrop: BiggestDrop | null;
+};
+
+/**
+ * The funnel step that loses the most students: the largest decrease, in
+ * percentage points, between consecutive steps, starting from 100% enrolled.
+ */
+export type BiggestDrop = {
+  lessonId: number;
+  title: string;
+  /** Percentage points lost at this lesson. */
+  drop: number;
 };
 
 export type FunnelLesson = {
@@ -55,7 +68,9 @@ export type CourseFunnel = {
   lessons: FunnelLesson[];
 };
 
-function getCourseFunnel(course: CourseAnalytics): CourseFunnel {
+function getCourseFunnel(
+  course: Pick<CourseAnalytics, "id" | "title" | "enrolled">
+): CourseFunnel {
   const lessonRows = db
     .select({
       id: lessons.id,
@@ -84,6 +99,26 @@ function getCourseFunnel(course: CourseAnalytics): CourseFunnel {
       percentage: completionRate(l.completed, course.enrolled),
     })),
   };
+}
+
+/**
+ * Computed from the funnel's rounded percentages so it always matches what the
+ * funnel shows. Ties go to the earliest lesson.
+ */
+function getBiggestDrop(funnel: CourseFunnel): BiggestDrop | null {
+  if (funnel.enrolled === 0) return null;
+
+  let previous = 100;
+  let biggest: BiggestDrop | null = null;
+  for (const lesson of funnel.lessons) {
+    const percentage = lesson.percentage!;
+    const drop = previous - percentage;
+    if (!biggest || drop > biggest.drop) {
+      biggest = { lessonId: lesson.id, title: lesson.title, drop };
+    }
+    previous = percentage;
+  }
+  return biggest;
 }
 
 /**
@@ -175,14 +210,20 @@ export function getInstructorAnalytics(
     averageProgress: toPercent(counts.averageProgress),
   };
 
-  const courseAnalytics: CourseAnalytics[] = courseRows.map((row) => ({
-    id: row.id,
-    title: row.title,
-    enrolled: row.enrolled,
-    completed: row.completed,
-    completionRate: completionRate(row.completed, row.enrolled),
-    averageProgress: toPercent(row.averageProgress),
-  }));
+  const funnels = new Map<number, CourseFunnel>();
+  const courseAnalytics: CourseAnalytics[] = courseRows.map((row) => {
+    const course = {
+      id: row.id,
+      title: row.title,
+      enrolled: row.enrolled,
+      completed: row.completed,
+      completionRate: completionRate(row.completed, row.enrolled),
+      averageProgress: toPercent(row.averageProgress),
+    };
+    const funnel = getCourseFunnel(course);
+    funnels.set(course.id, funnel);
+    return { ...course, biggestDrop: getBiggestDrop(funnel) };
+  });
 
   // Default: most enrollments; ties go to the first course by title.
   const selected =
@@ -198,7 +239,7 @@ export function getInstructorAnalytics(
   }
 
   return {
-    funnel: selected ? getCourseFunnel(selected) : null,
+    funnel: selected ? funnels.get(selected.id)! : null,
     hasCourses: courseIds.length > 0,
     summary,
     courses: courseAnalytics,

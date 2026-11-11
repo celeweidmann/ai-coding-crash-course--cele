@@ -214,6 +214,7 @@ describe("getInstructorAnalytics", () => {
           completed: 1,
           completionRate: 50,
           averageProgress: 50,
+          biggestDrop: { lessonId: lessons[0].id, title: "Lesson 1", drop: 50 },
         },
       ]);
     });
@@ -231,6 +232,7 @@ describe("getInstructorAnalytics", () => {
           completed: 0,
           completionRate: null,
           averageProgress: null,
+          biggestDrop: null,
         },
       ]);
     });
@@ -509,6 +511,133 @@ describe("getInstructorAnalytics", () => {
       expect(() =>
         getInstructorAnalytics(base.instructor.id, otherCourse.id)
       ).toThrow(CourseNotFoundError);
+    });
+  });
+
+  describe("biggest drop", () => {
+    function biggestDropOf(courseId: number) {
+      const { courses } = getInstructorAnalytics(base.instructor.id);
+      return courses.find((c) => c.id === courseId)!.biggestDrop;
+    }
+
+    function enrollStudents(courseId: number, count: number) {
+      return Array.from({ length: count }, (_, i) => {
+        const s = createStudent(`drop-${courseId}-${i}@example.com`);
+        enroll(s.id, courseId);
+        return s;
+      });
+    }
+
+    it("finds the largest decrease between consecutive lessons", () => {
+      // 4 enrolled. Lessons: 100%, 75%, 25%, 0%.
+      // Drops: 0, 25, 50, 25 → Lesson 3 with 50 points.
+      const [l1, l2, l3] = createLessons(base.course.id, 4);
+      const students = enrollStudents(base.course.id, 4);
+      students.forEach((s) => completeLesson(s.id, l1.id));
+      students.slice(0, 3).forEach((s) => completeLesson(s.id, l2.id));
+      completeLesson(students[0].id, l3.id);
+
+      expect(biggestDropOf(base.course.id)).toEqual({
+        lessonId: l3.id,
+        title: "Lesson 3",
+        drop: 50,
+      });
+    });
+
+    it("considers the drop from enrolled (100%) to the first lesson", () => {
+      // 4 enrolled. Lessons: 25%, 25%, 0%. Drops: 75, 0, 25 → Lesson 1.
+      const [l1, l2] = createLessons(base.course.id, 3);
+      const [s1] = enrollStudents(base.course.id, 4);
+      completeLesson(s1.id, l1.id);
+      completeLesson(s1.id, l2.id);
+
+      expect(biggestDropOf(base.course.id)).toEqual({
+        lessonId: l1.id,
+        title: "Lesson 1",
+        drop: 75,
+      });
+    });
+
+    it("ignores increases between lessons", () => {
+      // 2 enrolled. Lessons: 50%, 100%. Drops: 50, -50 → Lesson 1.
+      const [l1, l2] = createLessons(base.course.id, 2);
+      const [s1, s2] = enrollStudents(base.course.id, 2);
+      completeLesson(s1.id, l1.id);
+      completeLesson(s1.id, l2.id);
+      completeLesson(s2.id, l2.id);
+
+      expect(biggestDropOf(base.course.id)).toMatchObject({
+        lessonId: l1.id,
+        drop: 50,
+      });
+    });
+
+    it("picks the earliest lesson when drops tie", () => {
+      // 2 enrolled. Lessons: 50%, 0%. Drops: 50, 50 → Lesson 1.
+      const [l1] = createLessons(base.course.id, 2);
+      const [s1] = enrollStudents(base.course.id, 2);
+      completeLesson(s1.id, l1.id);
+
+      expect(biggestDropOf(base.course.id)).toMatchObject({
+        lessonId: l1.id,
+        drop: 50,
+      });
+    });
+
+    it("is null for a course with no enrollments", () => {
+      createLessons(base.course.id, 2);
+
+      expect(biggestDropOf(base.course.id)).toBeNull();
+    });
+
+    it("is null for a course with no lessons", () => {
+      enrollStudents(base.course.id, 2);
+
+      expect(biggestDropOf(base.course.id)).toBeNull();
+    });
+
+    it("is consistent with the course's funnel", () => {
+      // 3 enrolled: rounded percentages 67, 33, 0 → drops 33, 34, 33.
+      const [l1, l2] = createLessons(base.course.id, 3);
+      const [s1, s2] = enrollStudents(base.course.id, 3);
+      completeLesson(s1.id, l1.id);
+      completeLesson(s2.id, l1.id);
+      completeLesson(s1.id, l2.id);
+
+      const { courses, funnel } = getInstructorAnalytics(
+        base.instructor.id,
+        base.course.id
+      );
+      const row = courses.find((c) => c.id === base.course.id)!;
+
+      // Rounded funnel steps 100 → 67 → 33 → 0; exact values would tie at 33.3.
+      expect(funnel!.lessons.map((l) => l.percentage)).toEqual([67, 33, 0]);
+      expect(row.biggestDrop).toEqual({
+        lessonId: l2.id,
+        title: "Lesson 2",
+        drop: 34,
+      });
+    });
+
+    it("is computed for every course, not only the selected one", () => {
+      const courseB = createCourse(base.instructor.id, "course-b");
+      const [b1] = createLessons(courseB.id, 1);
+      createLessons(base.course.id, 1);
+      enrollStudents(base.course.id, 2);
+      const [sb] = enrollStudents(courseB.id, 2);
+      completeLesson(sb.id, b1.id);
+
+      const { funnel, courses } = getInstructorAnalytics(
+        base.instructor.id,
+        base.course.id
+      );
+
+      expect(funnel!.courseId).toBe(base.course.id);
+      expect(courses.find((c) => c.id === courseB.id)!.biggestDrop).toEqual({
+        lessonId: b1.id,
+        title: "Lesson 1",
+        drop: 50,
+      });
     });
   });
 });
