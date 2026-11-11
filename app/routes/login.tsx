@@ -5,6 +5,7 @@ import type { Route } from "./+types/login";
 import { getUserByEmail } from "~/services/userService";
 import { setCurrentUserId, getCurrentUserId } from "~/lib/session";
 import { parseFormData } from "~/lib/validation";
+import { getLoginDestination } from "~/lib/login-destination";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Card, CardContent } from "~/components/ui/card";
@@ -59,8 +60,10 @@ export async function action({ request, url }: Route.ActionArgs) {
     );
   }
 
-  const redirectTo = url.searchParams.get("redirectTo");
-  const destination = redirectTo && redirectTo.startsWith("/") ? redirectTo : "/courses";
+  const destination = getLoginDestination(
+    user.role,
+    url.searchParams.get("redirectTo")
+  );
 
   const cookie = await setCurrentUserId(request, user.id);
   throw redirect(destination, {
