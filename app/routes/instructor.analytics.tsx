@@ -224,7 +224,7 @@ function FunnelSection({
         <CardContent className="pt-6">
           {funnel.enrolled === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
-              Todavía no hay alumnos
+              No students enrolled yet.
             </p>
           ) : funnel.lessons.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
