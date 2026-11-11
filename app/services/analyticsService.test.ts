@@ -1,0 +1,240 @@
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { createTestDb, seedBaseData } from "~/test/setup";
+import * as schema from "~/db/schema";
+
+let testDb: ReturnType<typeof createTestDb>;
+let base: ReturnType<typeof seedBaseData>;
+
+vi.mock("~/db", () => ({
+  get db() {
+    return testDb;
+  },
+}));
+
+// Import after mock so the module picks up our test db
+import { getInstructorAnalytics } from "./analyticsService";
+
+function createInstructor(email: string) {
+  return testDb
+    .insert(schema.users)
+    .values({ name: email, email, role: schema.UserRole.Instructor })
+    .returning()
+    .get();
+}
+
+function createStudent(email: string) {
+  return testDb
+    .insert(schema.users)
+    .values({ name: email, email, role: schema.UserRole.Student })
+    .returning()
+    .get();
+}
+
+function createCourse(
+  instructorId: number,
+  slug: string,
+  status: schema.CourseStatus = schema.CourseStatus.Published
+) {
+  return testDb
+    .insert(schema.courses)
+    .values({
+      title: slug,
+      slug,
+      description: slug,
+      salesCopy: slug,
+      instructorId,
+      categoryId: base.category.id,
+      status,
+    })
+    .returning()
+    .get();
+}
+
+function createLessons(courseId: number, count: number) {
+  const mod = testDb
+    .insert(schema.modules)
+    .values({ courseId, title: "Module", position: 1 })
+    .returning()
+    .get();
+  return Array.from({ length: count }, (_, i) =>
+    testDb
+      .insert(schema.lessons)
+      .values({ moduleId: mod.id, title: `Lesson ${i + 1}`, position: i + 1 })
+      .returning()
+      .get()
+  );
+}
+
+function enroll(userId: number, courseId: number, completed = false) {
+  return testDb
+    .insert(schema.enrollments)
+    .values({
+      userId,
+      courseId,
+      completedAt: completed ? new Date().toISOString() : null,
+    })
+    .returning()
+    .get();
+}
+
+function completeLesson(userId: number, lessonId: number) {
+  testDb
+    .insert(schema.lessonProgress)
+    .values({
+      userId,
+      lessonId,
+      status: schema.LessonProgressStatus.Completed,
+      completedAt: new Date().toISOString(),
+    })
+    .run();
+}
+
+describe("getInstructorAnalytics", () => {
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+  });
+
+  describe("summary", () => {
+    it("returns an empty summary for an instructor with no courses", () => {
+      const lonely = createInstructor("lonely@example.com");
+
+      const result = getInstructorAnalytics(lonely.id);
+
+      expect(result.hasCourses).toBe(false);
+      expect(result.summary).toEqual({
+        uniqueStudents: 0,
+        enrollments: 0,
+        completedEnrollments: 0,
+        completionRate: null,
+        averageProgress: null,
+      });
+    });
+
+    it("returns null rates for a course with no enrollments", () => {
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      expect(result.hasCourses).toBe(true);
+      expect(result.summary).toEqual({
+        uniqueStudents: 0,
+        enrollments: 0,
+        completedEnrollments: 0,
+        completionRate: null,
+        averageProgress: null,
+      });
+    });
+
+    it("counts enrollments, completed enrollments and the completion rate", () => {
+      const s2 = createStudent("s2@example.com");
+      const s3 = createStudent("s3@example.com");
+      const s4 = createStudent("s4@example.com");
+      enroll(base.user.id, base.course.id, true);
+      enroll(s2.id, base.course.id);
+      enroll(s3.id, base.course.id);
+      enroll(s4.id, base.course.id);
+
+      const { hasCourses, summary } = getInstructorAnalytics(base.instructor.id);
+
+      expect(hasCourses).toBe(true);
+      expect(summary.enrollments).toBe(4);
+      expect(summary.completedEnrollments).toBe(1);
+      expect(summary.completionRate).toBe(25);
+    });
+
+    it("counts a student enrolled in two of the instructor's courses once", () => {
+      const second = createCourse(base.instructor.id, "second-course");
+      const s2 = createStudent("s2@example.com");
+      enroll(base.user.id, base.course.id);
+      enroll(base.user.id, second.id);
+      enroll(s2.id, second.id);
+
+      const { summary } = getInstructorAnalytics(base.instructor.id);
+
+      expect(summary.uniqueStudents).toBe(2);
+      expect(summary.enrollments).toBe(3);
+    });
+
+    it("averages progress per enrollment across courses", () => {
+      // Course A: 4 lessons. Student 1 completed 2 (50%), student 2 completed 4 (100%).
+      // Course B: 2 lessons. Student 1 completed 0 (0%).
+      // Average of 50, 100, 0 = 50.
+      const lessonsA = createLessons(base.course.id, 4);
+      const courseB = createCourse(base.instructor.id, "course-b");
+      createLessons(courseB.id, 2);
+      const s2 = createStudent("s2@example.com");
+      enroll(base.user.id, base.course.id);
+      enroll(s2.id, base.course.id);
+      enroll(base.user.id, courseB.id);
+      completeLesson(base.user.id, lessonsA[0].id);
+      completeLesson(base.user.id, lessonsA[1].id);
+      lessonsA.forEach((l) => completeLesson(s2.id, l.id));
+
+      const { summary } = getInstructorAnalytics(base.instructor.id);
+
+      expect(summary.averageProgress).toBe(50);
+    });
+
+    it("ignores lessons that are only in progress", () => {
+      const [lesson1, lesson2] = createLessons(base.course.id, 2);
+      enroll(base.user.id, base.course.id);
+      completeLesson(base.user.id, lesson1.id);
+      testDb
+        .insert(schema.lessonProgress)
+        .values({
+          userId: base.user.id,
+          lessonId: lesson2.id,
+          status: schema.LessonProgressStatus.InProgress,
+        })
+        .run();
+
+      const { summary } = getInstructorAnalytics(base.instructor.id);
+
+      expect(summary.averageProgress).toBe(50);
+    });
+  });
+
+  describe("course scope", () => {
+    it("excludes draft courses and includes archived ones", () => {
+      const draft = createCourse(
+        base.instructor.id,
+        "draft-course",
+        schema.CourseStatus.Draft
+      );
+      const archived = createCourse(
+        base.instructor.id,
+        "archived-course",
+        schema.CourseStatus.Archived
+      );
+      const s2 = createStudent("s2@example.com");
+      enroll(base.user.id, draft.id, true);
+      enroll(s2.id, archived.id, true);
+
+      const { summary } = getInstructorAnalytics(base.instructor.id);
+
+      expect(summary.enrollments).toBe(1);
+      expect(summary.completedEnrollments).toBe(1);
+      expect(summary.uniqueStudents).toBe(1);
+    });
+
+    it("treats an instructor with only draft courses as having no courses", () => {
+      const drafter = createInstructor("drafter@example.com");
+      createCourse(drafter.id, "only-draft", schema.CourseStatus.Draft);
+
+      expect(getInstructorAnalytics(drafter.id).hasCourses).toBe(false);
+    });
+
+    it("never counts another instructor's courses", () => {
+      const other = createInstructor("other@example.com");
+      const otherCourse = createCourse(other.id, "other-course");
+      enroll(base.user.id, otherCourse.id, true);
+
+      const mine = getInstructorAnalytics(base.instructor.id);
+      const theirs = getInstructorAnalytics(other.id);
+
+      expect(mine.summary.enrollments).toBe(0);
+      expect(mine.summary.completionRate).toBeNull();
+      expect(theirs.summary.enrollments).toBe(1);
+      expect(theirs.summary.completionRate).toBe(100);
+    });
+  });
+});
