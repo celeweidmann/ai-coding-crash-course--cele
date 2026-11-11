@@ -12,7 +12,10 @@ vi.mock("~/db", () => ({
 }));
 
 // Import after mock so the module picks up our test db
-import { getInstructorAnalytics } from "./analyticsService";
+import {
+  CourseNotFoundError,
+  getInstructorAnalytics,
+} from "./analyticsService";
 
 function createInstructor(email: string) {
   return testDb
@@ -342,6 +345,170 @@ describe("getInstructorAnalytics", () => {
       expect(theirs.summary.completionRate).toBe(100);
       expect(mine.courses.map((c) => c.id)).toEqual([base.course.id]);
       expect(theirs.courses.map((c) => c.id)).toEqual([otherCourse.id]);
+    });
+  });
+  describe("funnel", () => {
+    function createModule(courseId: number, position: number) {
+      return testDb
+        .insert(schema.modules)
+        .values({ courseId, title: `Module ${position}`, position })
+        .returning()
+        .get();
+    }
+
+    function createLesson(moduleId: number, title: string, position: number) {
+      return testDb
+        .insert(schema.lessons)
+        .values({ moduleId, title, position })
+        .returning()
+        .get();
+    }
+
+    it("orders lessons by module position, then lesson position", () => {
+      // Inserted out of order on purpose.
+      const mod2 = createModule(base.course.id, 2);
+      const mod1 = createModule(base.course.id, 1);
+      createLesson(mod2.id, "2.2", 2);
+      createLesson(mod1.id, "1.2", 2);
+      createLesson(mod2.id, "2.1", 1);
+      createLesson(mod1.id, "1.1", 1);
+
+      const { funnel } = getInstructorAnalytics(
+        base.instructor.id,
+        base.course.id
+      );
+
+      expect(funnel!.lessons.map((l) => l.title)).toEqual([
+        "1.1",
+        "1.2",
+        "2.1",
+        "2.2",
+      ]);
+    });
+    it("counts completed lessons as a percentage of enrolled students", () => {
+      // 4 enrolled. Lesson 1: 3 completed (75%). Lesson 2: 1 completed (25%).
+      // Lesson 3: nobody (0%).
+      const [l1, l2, l3] = createLessons(base.course.id, 3);
+      const students = [
+        base.user,
+        createStudent("s2@example.com"),
+        createStudent("s3@example.com"),
+        createStudent("s4@example.com"),
+      ];
+      students.forEach((s) => enroll(s.id, base.course.id));
+      students.slice(0, 3).forEach((s) => completeLesson(s.id, l1.id));
+      completeLesson(students[0].id, l2.id);
+
+      const { funnel } = getInstructorAnalytics(
+        base.instructor.id,
+        base.course.id
+      );
+
+      expect(funnel).toEqual({
+        courseId: base.course.id,
+        title: base.course.title,
+        enrolled: 4,
+        lessons: [
+          { id: l1.id, title: "Lesson 1", completed: 3, percentage: 75 },
+          { id: l2.id, title: "Lesson 2", completed: 1, percentage: 25 },
+          { id: l3.id, title: "Lesson 3", completed: 0, percentage: 0 },
+        ],
+      });
+    });
+
+    it("ignores lessons that are only in progress", () => {
+      const [lesson] = createLessons(base.course.id, 1);
+      const s2 = createStudent("s2@example.com");
+      enroll(base.user.id, base.course.id);
+      enroll(s2.id, base.course.id);
+      completeLesson(base.user.id, lesson.id);
+      testDb
+        .insert(schema.lessonProgress)
+        .values({
+          userId: s2.id,
+          lessonId: lesson.id,
+          status: schema.LessonProgressStatus.InProgress,
+        })
+        .run();
+
+      const { funnel } = getInstructorAnalytics(
+        base.instructor.id,
+        base.course.id
+      );
+
+      expect(funnel!.lessons[0]).toMatchObject({ completed: 1, percentage: 50 });
+    });
+
+    it("ignores progress from students not enrolled in the course", () => {
+      const [lesson] = createLessons(base.course.id, 1);
+      const outsider = createStudent("outsider@example.com");
+      enroll(base.user.id, base.course.id);
+      completeLesson(outsider.id, lesson.id);
+
+      const { funnel } = getInstructorAnalytics(
+        base.instructor.id,
+        base.course.id
+      );
+
+      expect(funnel!.lessons[0]).toMatchObject({ completed: 0, percentage: 0 });
+    });
+    it("defaults to the course with the most enrollments", () => {
+      const popular = createCourse(base.instructor.id, "popular");
+      const s2 = createStudent("s2@example.com");
+      enroll(base.user.id, base.course.id);
+      enroll(base.user.id, popular.id);
+      enroll(s2.id, popular.id);
+
+      const { funnel } = getInstructorAnalytics(base.instructor.id);
+
+      expect(funnel).toMatchObject({ courseId: popular.id, enrolled: 2 });
+    });
+
+    it("is null when the instructor has no eligible courses", () => {
+      const drafter = createInstructor("drafter@example.com");
+      createCourse(drafter.id, "only-draft", schema.CourseStatus.Draft);
+
+      expect(getInstructorAnalytics(drafter.id).funnel).toBeNull();
+    });
+
+    it("has null percentages for a course with no enrollments", () => {
+      const [lesson] = createLessons(base.course.id, 1);
+
+      const { funnel } = getInstructorAnalytics(
+        base.instructor.id,
+        base.course.id
+      );
+
+      expect(funnel).toMatchObject({
+        enrolled: 0,
+        lessons: [{ id: lesson.id, completed: 0, percentage: null }],
+      });
+    });
+    it("signals not found for a course that does not exist", () => {
+      expect(() =>
+        getInstructorAnalytics(base.instructor.id, 999_999)
+      ).toThrow(CourseNotFoundError);
+    });
+
+    it("signals not found for a draft course", () => {
+      const draft = createCourse(
+        base.instructor.id,
+        "draft-course",
+        schema.CourseStatus.Draft
+      );
+
+      expect(() => getInstructorAnalytics(base.instructor.id, draft.id)).toThrow(
+        CourseNotFoundError
+      );
+    });
+
+    it("signals not found for another instructor's course", () => {
+      const other = createInstructor("other@example.com");
+      const otherCourse = createCourse(other.id, "other-course");
+
+      expect(() =>
+        getInstructorAnalytics(base.instructor.id, otherCourse.id)
+      ).toThrow(CourseNotFoundError);
     });
   });
 });

@@ -39,6 +39,64 @@ export type CourseAnalytics = {
   averageProgress: number | null;
 };
 
+export type FunnelLesson = {
+  id: number;
+  title: string;
+  /** Students who completed the lesson, among those enrolled in the course. */
+  completed: number;
+  /** Percentage 0–100 of enrolled students, or null when nobody is enrolled. */
+  percentage: number | null;
+};
+
+export type CourseFunnel = {
+  courseId: number;
+  title: string;
+  enrolled: number;
+  lessons: FunnelLesson[];
+};
+
+function getCourseFunnel(course: CourseAnalytics): CourseFunnel {
+  const lessonRows = db
+    .select({
+      id: lessons.id,
+      title: lessons.title,
+      // Only completed progress from students enrolled in this course counts.
+      completed: sql<number>`(
+        select count(distinct ${lessonProgress.userId}) from ${lessonProgress}
+        join ${enrollments} on ${enrollments.userId} = ${lessonProgress.userId}
+          and ${enrollments.courseId} = ${course.id}
+        where ${lessonProgress.lessonId} = ${lessons.id}
+          and ${lessonProgress.status} = ${LessonProgressStatus.Completed}
+      )`,
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(modules.id, lessons.moduleId))
+    .where(eq(modules.courseId, course.id))
+    .orderBy(asc(modules.position), asc(lessons.position))
+    .all();
+
+  return {
+    courseId: course.id,
+    title: course.title,
+    enrolled: course.enrolled,
+    lessons: lessonRows.map((l) => ({
+      ...l,
+      percentage: completionRate(l.completed, course.enrolled),
+    })),
+  };
+}
+
+/**
+ * The selected course does not exist, is a draft, or belongs to another
+ * instructor. Routes answer 404.
+ */
+export class CourseNotFoundError extends Error {
+  constructor(courseId: number) {
+    super(`Course ${courseId} not found`);
+    this.name = "CourseNotFoundError";
+  }
+}
+
 // Correlated subqueries evaluated per enrollment row.
 const courseLessonCount = sql`(
   select count(*) from ${lessons}
@@ -69,7 +127,10 @@ function completionRate(completed: number, enrolled: number) {
   return toPercent(enrolled === 0 ? null : completed / enrolled);
 }
 
-export function getInstructorAnalytics(instructorId: number) {
+export function getInstructorAnalytics(
+  instructorId: number,
+  selectedCourseId?: number
+) {
   // Left join so courses without enrollments still get a row; the null
   // enrollment row must not count as a 0% enrollment in the average.
   const courseRows = db
@@ -123,7 +184,21 @@ export function getInstructorAnalytics(instructorId: number) {
     averageProgress: toPercent(row.averageProgress),
   }));
 
+  // Default: most enrollments; ties go to the first course by title.
+  const selected =
+    selectedCourseId === undefined
+      ? courseAnalytics.reduce<CourseAnalytics | undefined>(
+          (best, c) => (!best || c.enrolled > best.enrolled ? c : best),
+          undefined
+        )
+      : courseAnalytics.find((c) => c.id === selectedCourseId);
+
+  if (selectedCourseId !== undefined && !selected) {
+    throw new CourseNotFoundError(selectedCourseId);
+  }
+
   return {
+    funnel: selected ? getCourseFunnel(selected) : null,
     hasCourses: courseIds.length > 0,
     summary,
     courses: courseAnalytics,

@@ -1,11 +1,23 @@
-import { Link } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import type { Route } from "./+types/instructor.analytics";
-import { getInstructorAnalytics } from "~/services/analyticsService";
+import {
+  CourseNotFoundError,
+  getInstructorAnalytics,
+  type CourseAnalytics,
+  type CourseFunnel,
+} from "~/services/analyticsService";
 import { getCurrentUserId } from "~/lib/session";
 import { getUserById } from "~/services/userService";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 import { AlertTriangle, BarChart3, Plus } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { UserRole } from "~/db/schema";
@@ -32,7 +44,20 @@ export async function loader({ request }: Route.LoaderArgs) {
     throw data("Only instructors can access this page.", { status: 403 });
   }
 
-  return getInstructorAnalytics(currentUserId);
+  const courseParam = new URL(request.url).searchParams.get("course");
+  const selectedCourseId = courseParam === null ? undefined : Number(courseParam);
+
+  try {
+    if (selectedCourseId !== undefined && !Number.isInteger(selectedCourseId)) {
+      throw new CourseNotFoundError(selectedCourseId);
+    }
+    return await getInstructorAnalytics(currentUserId, selectedCourseId);
+  } catch (error) {
+    if (error instanceof CourseNotFoundError) {
+      throw data("Course not found.", { status: 404 });
+    }
+    throw error;
+  }
 }
 
 function formatPercent(value: number | null) {
@@ -62,7 +87,7 @@ export function HydrateFallback() {
 export default function InstructorAnalytics({
   loaderData,
 }: Route.ComponentProps) {
-  const { hasCourses, summary, courses } = loaderData;
+  const { hasCourses, summary, courses, funnel } = loaderData;
 
   const stats = [
     { label: "Students", value: String(summary.uniqueStudents) },
@@ -156,9 +181,84 @@ export default function InstructorAnalytics({
               </div>
             </CardContent>
           </Card>
+
+          {funnel && <FunnelSection funnel={funnel} courses={courses} />}
         </>
       )}
     </div>
+  );
+}
+
+function FunnelSection({
+  funnel,
+  courses,
+}: {
+  funnel: CourseFunnel;
+  courses: CourseAnalytics[];
+}) {
+  const [, setSearchParams] = useSearchParams();
+
+  return (
+    <>
+      <div className="mb-4 mt-10 flex flex-wrap items-center justify-between gap-4">
+        <h2 className="text-xl font-semibold">Drop-off funnel</h2>
+        <Select
+          value={String(funnel.courseId)}
+          onValueChange={(courseId) =>
+            setSearchParams({ course: courseId }, { preventScrollReset: true })
+          }
+        >
+          <SelectTrigger className="w-72" aria-label="Course">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {courses.map((course) => (
+              <SelectItem key={course.id} value={String(course.id)}>
+                {course.title}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <Card>
+        <CardContent className="pt-6">
+          {funnel.enrolled === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              Todavía no hay alumnos
+            </p>
+          ) : funnel.lessons.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              This course has no lessons yet.
+            </p>
+          ) : (
+            <>
+              <p className="mb-4 text-sm text-muted-foreground">
+                Share of the {funnel.enrolled} enrolled students who completed
+                each lesson
+              </p>
+              <ol className="space-y-3">
+                {funnel.lessons.map((lesson) => (
+                  <li key={lesson.id}>
+                    <div className="mb-1 flex justify-between gap-4 text-sm">
+                      <span className="truncate">{lesson.title}</span>
+                      <span className="tabular-nums text-muted-foreground">
+                        {formatPercent(lesson.percentage)} ({lesson.completed})
+                      </span>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary"
+                        style={{ width: `${lesson.percentage ?? 0}%` }}
+                      />
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            </>
+          )}
+        </CardContent>
+      </Card>
+    </>
   );
 }
 
